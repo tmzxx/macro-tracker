@@ -13,33 +13,6 @@ const MACROS = [
 const MAX_DIM = 1024;
 const JPEG_QUALITY = 0.8;
 
-async function normalizeFile(file) {
-  const isHeic =
-    file.type === "image/heic" ||
-    file.type === "image/heif" ||
-    /\.(heic|heif)$/i.test(file.name);
-
-  if (!isHeic) return file;
-
-  // Safari natively decodes HEIC — skip conversion if the browser can load it.
-  const nativeSupport = await new Promise((resolve) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => { URL.revokeObjectURL(url); resolve(true); };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(false); };
-    img.src = url;
-  });
-  if (nativeSupport) return file;
-
-  // Non-Safari: convert via heic2any. Handle both default and named export shapes.
-  const mod = await import("heic2any");
-  const convert = typeof mod.default === "function" ? mod.default : mod;
-  const blob = await convert({ blob: file, toType: "image/jpeg", quality: 1 });
-  const result = Array.isArray(blob) ? blob[0] : blob;
-  return new File([result], file.name.replace(/\.(heic|heif)$/i, ".jpg"), {
-    type: "image/jpeg",
-  });
-}
 
 function compressImage(file) {
   return new Promise((resolve, reject) => {
@@ -91,10 +64,10 @@ function mealLabel(m) {
 }
 
 // ── Spinner ────────────────────────────────────────────────────────────────
-function Spinner() {
+function Spinner({ className = "text-white" }) {
   return (
     <svg
-      className="animate-spin h-4 w-4 text-white"
+      className={`animate-spin h-4 w-4 ${className}`}
       xmlns="http://www.w3.org/2000/svg"
       fill="none"
       viewBox="0 0 24 24"
@@ -107,14 +80,49 @@ function Spinner() {
 }
 
 // ── Macro card ─────────────────────────────────────────────────────────────
-function MacroCard({ label, value, unit, color, large = false }) {
+function MacroCard({ label, value, unit, color, large = false, target = null }) {
   return (
     <div className={`rounded-xl border p-4 ${color}`}>
       <p className="text-xs font-semibold uppercase tracking-wide opacity-60">{label}</p>
       <p className={`font-bold mt-1 leading-none ${large ? "text-2xl" : "text-xl"}`}>
         {value}
+        {target != null && (
+          <span className="text-sm font-normal opacity-50"> / {target}</span>
+        )}
         <span className="text-xs font-normal ml-1">{unit}</span>
       </p>
+    </div>
+  );
+}
+
+// ── Image modal ────────────────────────────────────────────────────────────
+function ImageModal({ url, alt, onClose }) {
+  useEffect(() => {
+    function onKey(e) { if (e.key === "Escape") onClose(); }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+      onClick={onClose}
+    >
+      <button
+        onClick={onClose}
+        className="absolute top-4 right-4 rounded-full bg-white/10 hover:bg-white/20 text-white p-2 transition-colors"
+        aria-label="Close"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+          <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+        </svg>
+      </button>
+      <img
+        src={url}
+        alt={alt}
+        className="max-h-[90vh] max-w-full rounded-xl object-contain shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      />
     </div>
   );
 }
@@ -124,12 +132,17 @@ export default function Home() {
   const [meal, setMeal] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState("");
-  const [result, setResult] = useState(null);
+  const [draft, setDraft] = useState(null);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [loading, setLoading] = useState(false);
+  const [logMealLoading, setLogMealLoading] = useState(false);
+  const [recalcLoading, setRecalcLoading] = useState(false);
   const [todayMeals, setTodayMeals] = useState([]);
   const [logLoading, setLogLoading] = useState(true);
+  const [profile, setProfile] = useState(null);
+  const [modalUrl, setModalUrl] = useState(null);
+  const [modalAlt, setModalAlt] = useState("");
   const fileInputRef = useRef(null);
 
   const fetchTodayMeals = useCallback(async () => {
@@ -147,16 +160,35 @@ export default function Home() {
 
   useEffect(() => { fetchTodayMeals(); }, [fetchTodayMeals]);
 
-  async function handleImageChange(e) {
-    const raw = e.target.files?.[0];
-    if (!raw) return;
-    try {
-      const file = await normalizeFile(raw);
-      setImageFile(file);
-      setImagePreview(URL.createObjectURL(file));
-    } catch {
-      setError("Could not load that image. Please try a different file.");
+  useEffect(() => {
+    supabase
+      .from("user_profile")
+      .select("target_calories, target_protein, target_carbs, target_fat")
+      .eq("singleton", true)
+      .maybeSingle()
+      .then(({ data }) => { if (data) setProfile(data); });
+  }, []);
+
+  function handleImageChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const isHeic =
+      file.type === "image/heic" ||
+      file.type === "image/heif" ||
+      /\.(heic|heif)$/i.test(file.name);
+
+    if (isHeic) {
+      setError(
+        "HEIC files are not supported. Please convert to JPG or PNG first — on iPhone, AirDrop the photo to your Mac and it will convert automatically."
+      );
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
     }
+
+    setError("");
+    setImageFile(file);
+    setImagePreview(URL.createObjectURL(file));
   }
 
   function removeImage() {
@@ -169,7 +201,7 @@ export default function Home() {
     e.preventDefault();
     if (!meal.trim() && !imageFile) return;
     setLoading(true);
-    setResult(null);
+    setDraft(null);
     setError("");
     setWarning("");
 
@@ -190,13 +222,18 @@ export default function Home() {
       if (data.error) {
         setError(data.error);
       } else {
-        setResult(data);
         if (data.storage_warning) {
           setWarning(`Photo not saved: ${data.storage_warning}`);
         }
-        setMeal("");
-        removeImage();
-        await fetchTodayMeals();
+        setDraft({
+          calories: data.calories,
+          protein: data.protein,
+          carbs: data.carbs,
+          fat: data.fat,
+          description: data.assumptions ?? "",
+          name: data.name ?? "",
+          image_url: data.image_url ?? null,
+        });
       }
     } catch {
       setError("Something went wrong. Please try again.");
@@ -205,7 +242,66 @@ export default function Home() {
     }
   }
 
-  const canSubmit = !loading && (meal.trim() || imageFile);
+  async function handleLogMeal() {
+    setLogMealLoading(true);
+    setError("");
+    const { error: dbError } = await supabase.from("meals").insert({
+      description: draft.description || null,
+      name: draft.name || null,
+      calories: Math.round(Number(draft.calories)),
+      protein: Math.round(Number(draft.protein)),
+      carbs: Math.round(Number(draft.carbs)),
+      fat: Math.round(Number(draft.fat)),
+      image_url: draft.image_url || null,
+    });
+    if (dbError) {
+      console.error("[logMeal] Supabase insert error:", dbError);
+      setError("Failed to log meal. Please try again.");
+    } else {
+      setDraft(null);
+      setMeal("");
+      removeImage();
+      await fetchTodayMeals();
+    }
+    setLogMealLoading(false);
+  }
+
+  async function handleRecalculate() {
+    if (!draft?.description.trim()) return;
+    setRecalcLoading(true);
+    setError("");
+    try {
+      const res = await fetch("/api/analyze-meal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meal: draft.description }),
+      });
+      const data = await res.json();
+      if (data.error) {
+        setError(data.error);
+      } else {
+        setDraft((prev) => ({
+          ...prev,
+          calories: data.calories,
+          protein: data.protein,
+          carbs: data.carbs,
+          fat: data.fat,
+          name: data.name ?? prev.name,
+        }));
+      }
+    } catch {
+      setError("Something went wrong. Please try again.");
+    } finally {
+      setRecalcLoading(false);
+    }
+  }
+
+  function handleReanalyse() {
+    setDraft(null);
+    setWarning("");
+  }
+
+  const canSubmit = !loading && !draft && (meal.trim() || imageFile);
 
   const totals = {
     calories: sum(todayMeals, "calories"),
@@ -215,6 +311,10 @@ export default function Home() {
   };
 
   return (
+    <>
+    {modalUrl && (
+      <ImageModal url={modalUrl} alt={modalAlt} onClose={() => setModalUrl(null)} />
+    )}
     <div className="min-h-screen bg-gray-50 py-8 px-4">
       <div className="mx-auto w-full max-w-lg flex flex-col gap-5">
 
@@ -237,7 +337,7 @@ export default function Home() {
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,.heic,.heif"
+              accept="image/jpeg,image/png,image/webp"
               onChange={handleImageChange}
               className="hidden"
             />
@@ -289,19 +389,52 @@ export default function Home() {
             </div>
           )}
 
-          {result && (
+          {draft && (
             <div className="mt-5 flex flex-col gap-3">
               <div className="grid grid-cols-2 gap-3">
                 {MACROS.map(({ key, label, unit, color }) => (
-                  <MacroCard key={key} label={label} value={result[key]} unit={unit} color={color} large />
+                  <MacroCard key={key} label={label} value={draft[key]} unit={unit} color={color} large />
                 ))}
               </div>
-              {result.assumptions && (
-                <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400 mb-1">Assumptions</p>
-                  <p className="text-sm text-gray-600 leading-relaxed">{result.assumptions}</p>
-                </div>
-              )}
+              <div className="flex flex-col gap-1.5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                  Edit description to recalculate
+                </p>
+                <textarea
+                  value={draft.description}
+                  onChange={(e) => setDraft((prev) => ({ ...prev, description: e.target.value }))}
+                  rows={3}
+                  placeholder="Describe what was in the meal…"
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-700 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleRecalculate}
+                disabled={recalcLoading || !draft.description.trim()}
+                className="flex items-center justify-center gap-2 rounded-lg border border-blue-300 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {recalcLoading && <Spinner className="text-blue-700" />}
+                {recalcLoading ? "Recalculating…" : "Recalculate"}
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={handleReanalyse}
+                  className="flex-1 rounded-lg border border-gray-300 px-4 py-3 text-sm font-semibold text-gray-600 hover:bg-gray-50 transition-colors"
+                >
+                  Re-analyse
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLogMeal}
+                  disabled={logMealLoading}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                >
+                  {logMealLoading && <Spinner />}
+                  {logMealLoading ? "Logging…" : "Log Meal"}
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -323,7 +456,7 @@ export default function Home() {
               {/* Daily totals */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-5">
                 {MACROS.map(({ key, label, unit, color }) => (
-                  <MacroCard key={key} label={label} value={totals[key]} unit={unit} color={color} />
+                  <MacroCard key={key} label={label} value={totals[key]} unit={unit} color={color} target={profile?.[`target_${key}`] ?? null} />
                 ))}
               </div>
 
@@ -332,11 +465,17 @@ export default function Home() {
                 {todayMeals.map((m) => (
                   <li key={m.id} className="flex gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3">
                     {m.image_url && (
-                      <img
-                        src={m.image_url}
-                        alt={mealLabel(m)}
-                        className="h-14 w-14 rounded-lg object-cover shrink-0"
-                      />
+                      <button
+                        type="button"
+                        onClick={() => { setModalUrl(m.image_url); setModalAlt(mealLabel(m)); }}
+                        className="h-14 w-14 shrink-0 rounded-lg overflow-hidden focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <img
+                          src={m.image_url}
+                          alt={mealLabel(m)}
+                          className="h-full w-full object-cover"
+                        />
+                      </button>
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
@@ -366,5 +505,6 @@ export default function Home() {
 
       </div>
     </div>
+    </>
   );
 }

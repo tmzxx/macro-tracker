@@ -83,20 +83,5 @@ export async function POST(request) {
     }
   }
 
-  const { error: dbError } = await supabase.from("meals").insert({
-    description: meal?.trim() || null,
-    name: data.name ?? null,
-    calories: data.calories,
-    protein: data.protein,
-    carbs: data.carbs,
-    fat: data.fat,
-    assumptions: data.assumptions,
-    image_url: imageUrl,
-  });
-
-  if (dbError) {
-    console.error("[analyze-meal] Supabase insert error:", dbError);
-  }
-
   return Response.json({ ...data, image_url: imageUrl, storage_warning: storageWarning });
 }
