@@ -63,6 +63,24 @@ function mealLabel(m) {
   return m.description || m.name || "Meal";
 }
 
+const MEAL_TAGS = [
+  { tag: "Breakfast",  from: 5,  to: 11,  color: "bg-amber-100 text-amber-700" },
+  { tag: "Lunch",      from: 11, to: 15,  color: "bg-green-100 text-green-700" },
+  { tag: "Snack",      from: 15, to: 18,  color: "bg-purple-100 text-purple-700" },
+  { tag: "Dinner",     from: 18, to: 23,  color: "bg-blue-100 text-blue-700" },
+  { tag: "Late night", from: 23, to: 29,  color: "bg-gray-200 text-gray-600" },
+];
+
+function getMealTag() {
+  const hour = new Date().getHours();
+  // Wrap late night: hours 23–23 match from=23, hours 0–4 match from=23 via hour+24
+  const h = hour < 5 ? hour + 24 : hour;
+  const match = MEAL_TAGS.find(({ from, to }) => h >= from && h < to);
+  return match?.tag ?? null;
+}
+
+const TAG_COLORS = Object.fromEntries(MEAL_TAGS.map(({ tag, color }) => [tag, color]));
+
 // ── Spinner ────────────────────────────────────────────────────────────────
 function Spinner({ className = "text-white" }) {
   return (
@@ -150,7 +168,7 @@ export default function Home() {
     const { start, end } = todayRange();
     const { data, error: dbError } = await supabase
       .from("meals")
-      .select("id, description, name, calories, protein, carbs, fat, image_url, created_at")
+      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at")
       .gte("created_at", start)
       .lte("created_at", end)
       .order("created_at", { ascending: false });
@@ -253,6 +271,7 @@ export default function Home() {
       carbs: Math.round(Number(draft.carbs)),
       fat: Math.round(Number(draft.fat)),
       image_url: draft.image_url || null,
+      meal_tag: getMealTag(),
     });
     if (dbError) {
       console.error("[logMeal] Supabase insert error:", dbError);
@@ -479,9 +498,16 @@ export default function Home() {
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
-                        <p className="text-sm font-medium text-gray-800 leading-snug truncate">
-                          {mealLabel(m)}
-                        </p>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <p className="text-sm font-medium text-gray-800 leading-snug truncate">
+                            {mealLabel(m)}
+                          </p>
+                          {m.meal_tag && (
+                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${TAG_COLORS[m.meal_tag] ?? "bg-gray-100 text-gray-500"}`}>
+                              {m.meal_tag}
+                            </span>
+                          )}
+                        </div>
                         <p className="text-xs text-gray-400 shrink-0">
                           {new Date(m.created_at).toLocaleTimeString([], {
                             hour: "2-digit",
