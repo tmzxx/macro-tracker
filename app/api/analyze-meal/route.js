@@ -3,8 +3,11 @@ import { supabase } from "@/lib/supabase";
 
 const client = new Anthropic();
 
-const SYSTEM_PROMPT =
-  'You are a nutrition expert. When given a meal description or image, estimate its macronutrients based on typical portion sizes. Respond with ONLY a JSON object — no markdown, no explanation, no other text. Use this exact format:\n{"name": string, "calories": number, "protein": number, "carbs": number, "fat": number, "assumptions": string}\n"name" should be a short 2–5 word meal label like "Chicken rice bowl" or "Caesar salad".';
+const VISUAL_SYSTEM_PROMPT =
+  'You are a nutrition expert specialising in visual portion estimation. Estimate the macronutrients of the meal shown or described. Use visual cues to estimate realistic gram weights: compare food volume to the plate or bowl size, note packing density, use any visible reference objects such as hands or utensils, and apply typical serving sizes for the cuisine. Your estimates should reflect realistic real-world portions — do not default to textbook serving sizes if the image clearly shows a larger or smaller amount. Respond with ONLY a JSON object — no markdown, no explanation, no other text. Use this exact format:\n{"name": string, "calories": number, "protein": number, "carbs": number, "fat": number, "assumptions": string}\n"name" should be a short 2–5 word meal label. "assumptions" should describe the specific portion weights you estimated and the visual cues you used.';
+
+const RECALC_SYSTEM_PROMPT =
+  'You are a nutrition expert. The user has described a meal with specific quantities. Calculate macronutrients strictly from the portions stated — ignore any previous estimates entirely. Treat every quantity mentioned as exact and authoritative: if the text says 15 cups of chicken breast, calculate macros for exactly 15 cups of chicken breast. Do not second-guess or adjust the stated amounts. Respond with ONLY a JSON object — no markdown, no explanation, no other text. Use this exact format:\n{"name": string, "calories": number, "protein": number, "carbs": number, "fat": number, "assumptions": string}\n"name" should be a short 2–5 word meal label. "assumptions" should confirm the exact portions used in the calculation.';
 
 export async function POST(request) {
   let body;
@@ -15,7 +18,8 @@ export async function POST(request) {
     return Response.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const { meal, image, mediaType } = body;
+  const { meal, image, mediaType, mode } = body;
+  const isRecalc = mode === "recalculate";
 
   if (!meal?.trim() && !image) {
     return Response.json({ error: "Provide a meal description or an image" }, { status: 400 });
@@ -27,7 +31,7 @@ export async function POST(request) {
     console.log("[analyze-meal] base64 length:", image.length, "≈", Math.round(image.length * 0.75 / 1024), "KB");
   }
 
-  const userContent = image
+  const userContent = (!isRecalc && image)
     ? [
         { type: "image", source: { type: "base64", media_type: mediaType, data: image } },
         { type: "text", text: meal?.trim() || "Estimate the macros for the meal in this image." },
@@ -39,7 +43,7 @@ export async function POST(request) {
     response = await client.messages.create({
       model: "claude-sonnet-4-6",
       max_tokens: 1024,
-      system: SYSTEM_PROMPT,
+      system: isRecalc ? RECALC_SYSTEM_PROMPT : VISUAL_SYSTEM_PROMPT,
       messages: [{ role: "user", content: userContent }],
     });
   } catch (err) {
