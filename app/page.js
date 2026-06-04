@@ -81,6 +81,24 @@ function getMealTag() {
 
 const TAG_COLORS = Object.fromEntries(MEAL_TAGS.map(({ tag, color }) => [tag, color]));
 
+function macroColor(value, target) {
+  if (target == null) return "text-gray-700";
+  if (value > target) return "text-red-600";
+  if (value >= target * 0.9) return "text-green-600";
+  return "text-amber-600";
+}
+
+function formatHistoryDate(dateStr) {
+  const [y, mo, d] = dateStr.split("-").map(Number);
+  const date = new Date(y, mo - 1, d);
+  const todayMidnight = new Date();
+  todayMidnight.setHours(0, 0, 0, 0);
+  const yesterdayMidnight = new Date(todayMidnight);
+  yesterdayMidnight.setDate(todayMidnight.getDate() - 1);
+  if (date.getTime() === yesterdayMidnight.getTime()) return "Yesterday";
+  return date.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" });
+}
+
 // ── Spinner ────────────────────────────────────────────────────────────────
 function Spinner({ className = "text-white" }) {
   return (
@@ -169,7 +187,46 @@ export default function Home() {
   const [profileLoaded, setProfileLoaded] = useState(false);
   const [coachingText, setCoachingText] = useState("");
   const [coachingLoading, setCoachingLoading] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [historyOffset, setHistoryOffset] = useState(0);
+  const [historyHasMore, setHistoryHasMore] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [expandedDays, setExpandedDays] = useState(new Set());
   const fileInputRef = useRef(null);
+
+  const fetchHistoryPage = useCallback(async (offset) => {
+    setHistoryLoading(true);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const end = new Date(today);
+    end.setDate(today.getDate() - offset - 1);
+    end.setHours(23, 59, 59, 999);
+    const start = new Date(today);
+    start.setDate(today.getDate() - offset - 7);
+    start.setHours(0, 0, 0, 0);
+    const { data, error: dbError } = await supabase
+      .from("meals")
+      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at")
+      .gte("created_at", start.toISOString())
+      .lte("created_at", end.toISOString())
+      .order("created_at", { ascending: false });
+    if (!dbError && data) {
+      const grouped = {};
+      for (const meal of data) {
+        const d = new Date(meal.created_at);
+        const key = [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
+        if (!grouped[key]) grouped[key] = [];
+        grouped[key].push(meal);
+      }
+      const days = Object.keys(grouped)
+        .sort((a, b) => b.localeCompare(a))
+        .map((dateStr) => ({ dateStr, meals: grouped[dateStr] }));
+      setHistory((prev) => [...prev, ...days]);
+      setHistoryHasMore(data.length > 0);
+      setHistoryOffset(offset + 7);
+    }
+    setHistoryLoading(false);
+  }, []);
 
   const fetchCoachingText = useCallback(async (meals, profileData) => {
     if (!profileData?.target_calories) { setCoachingText(""); return; }
@@ -223,6 +280,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => { fetchTodayMeals(); }, [fetchTodayMeals]);
+  useEffect(() => { fetchHistoryPage(0); }, [fetchHistoryPage]);
 
   useEffect(() => {
     if (!profileLoaded || logLoading) return;
@@ -448,6 +506,15 @@ export default function Home() {
       setTodayMeals((prev) => prev.filter((m) => m.id !== id));
       setDeleteConfirmId(null);
     }
+  }
+
+  function toggleDay(dateStr) {
+    setExpandedDays((prev) => {
+      const next = new Set(prev);
+      if (next.has(dateStr)) next.delete(dateStr);
+      else next.add(dateStr);
+      return next;
+    });
   }
 
   const canSubmit = !loading && !draft && (meal.trim() || imageFile);
@@ -810,6 +877,109 @@ export default function Home() {
                 )}
               </ul>
             </>
+          )}
+        </div>
+
+        {/* ── History ── */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
+          <h2 className="text-base font-bold text-gray-900 mb-1">History</h2>
+
+          {historyLoading && history.length === 0 ? (
+            <p className="text-sm text-gray-400 py-2">Loading…</p>
+          ) : history.length === 0 ? (
+            <p className="text-sm text-gray-400 py-2">No meals logged in the past 7 days.</p>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {history.map(({ dateStr, meals: dayMeals }) => {
+                const dayTotals = {
+                  calories: sum(dayMeals, "calories"),
+                  protein:  sum(dayMeals, "protein"),
+                  carbs:    sum(dayMeals, "carbs"),
+                  fat:      sum(dayMeals, "fat"),
+                };
+                const isExpanded = expandedDays.has(dateStr);
+                return (
+                  <div key={dateStr}>
+                    <button
+                      type="button"
+                      onClick={() => toggleDay(dateStr)}
+                      className="w-full py-3 flex items-center justify-between gap-3 text-left"
+                    >
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-gray-800">{formatHistoryDate(dateStr)}</p>
+                        <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-0.5 text-xs text-gray-500">
+                          <span><strong className={macroColor(dayTotals.calories, profile?.target_calories)}>{dayTotals.calories}</strong> kcal</span>
+                          <span><strong className={macroColor(dayTotals.protein, profile?.target_protein)}>{dayTotals.protein}g</strong> protein</span>
+                          <span><strong className={macroColor(dayTotals.carbs, profile?.target_carbs)}>{dayTotals.carbs}g</strong> carbs</span>
+                          <span><strong className={macroColor(dayTotals.fat, profile?.target_fat)}>{dayTotals.fat}g</strong> fat</span>
+                        </div>
+                      </div>
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        className={`h-4 w-4 shrink-0 text-gray-400 transition-transform duration-200 ${isExpanded ? "rotate-180" : ""}`}
+                        viewBox="0 0 20 20"
+                        fill="currentColor"
+                        aria-hidden="true"
+                      >
+                        <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
+                      </svg>
+                    </button>
+                    {isExpanded && (
+                      <ul className="flex flex-col gap-2 pb-3">
+                        {dayMeals.map((m) => (
+                          <li key={m.id} className="flex gap-3 rounded-xl border border-gray-100 bg-gray-50 p-3">
+                            {m.image_url && (
+                              <button
+                                type="button"
+                                onClick={() => { setModalUrl(m.image_url); setModalAlt(mealLabel(m)); }}
+                                className="h-14 w-14 shrink-0 rounded-lg overflow-hidden focus:outline-none focus:ring-2 focus:ring-blue-500"
+                              >
+                                <img src={m.image_url} alt={mealLabel(m)} className="h-full w-full object-cover" />
+                              </button>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <p className="text-sm font-medium text-gray-800 leading-snug truncate">{mealLabel(m)}</p>
+                                  {m.meal_tag && (
+                                    <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold ${TAG_COLORS[m.meal_tag] ?? "bg-gray-100 text-gray-500"}`}>
+                                      {m.meal_tag}
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-xs text-gray-400 shrink-0">
+                                  {new Date(m.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                                </p>
+                              </div>
+                              <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1.5 text-xs text-gray-500">
+                                <span><strong className="text-gray-700">{m.calories}</strong> kcal</span>
+                                <span><strong className="text-gray-700">{m.protein}g</strong> protein</span>
+                                <span><strong className="text-gray-700">{m.carbs}g</strong> carbs</span>
+                                <span><strong className="text-gray-700">{m.fat}g</strong> fat</span>
+                              </div>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {historyLoading && history.length > 0 && (
+            <p className="text-sm text-gray-400 py-3 text-center">Loading…</p>
+          )}
+
+          {!historyLoading && historyHasMore && (
+            <button
+              type="button"
+              onClick={() => fetchHistoryPage(historyOffset)}
+              className="mt-3 w-full rounded-lg border border-gray-200 py-2.5 text-sm font-medium text-gray-500 hover:bg-gray-50 transition-colors"
+            >
+              Load more
+            </button>
           )}
         </div>
 
