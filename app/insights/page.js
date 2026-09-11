@@ -90,8 +90,7 @@ export default function InsightsPage() {
   useEffect(() => {
     async function fetchData() {
       const monday = currentWeekMonday();
-      const end = new Date();
-      end.setHours(23, 59, 59, 999);
+      const today = new Date();
 
       const [{ data: profileData }, { data: mealsData }] = await Promise.all([
         supabase
@@ -101,9 +100,10 @@ export default function InsightsPage() {
           .maybeSingle(),
         supabase
           .from("meals")
-          .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at")
-          .gte("created_at", monday.toISOString())
-          .lte("created_at", end.toISOString())
+          .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at, logged_date")
+          .gte("logged_date", toDateStr(monday))
+          .lte("logged_date", toDateStr(today))
+          .order("logged_date", { ascending: true })
           .order("created_at", { ascending: true }),
       ]);
 
@@ -122,7 +122,7 @@ export default function InsightsPage() {
 
   const mealsByDate = {};
   for (const meal of weekMeals) {
-    const key = toDateStr(new Date(meal.created_at));
+    const key = meal.logged_date;
     if (!mealsByDate[key]) mealsByDate[key] = [];
     mealsByDate[key].push(meal);
   }

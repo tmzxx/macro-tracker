@@ -47,12 +47,16 @@ function compressImage(file) {
   });
 }
 
-function todayRange() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  const end = new Date();
-  end.setHours(23, 59, 59, 999);
-  return { start: start.toISOString(), end: end.toISOString() };
+function toDateStr(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function todayDateStr() {
+  return toDateStr(new Date());
 }
 
 function sum(meals, key) {
@@ -80,6 +84,8 @@ function getMealTag() {
 }
 
 const TAG_COLORS = Object.fromEntries(MEAL_TAGS.map(({ tag, color }) => [tag, color]));
+
+const BACKDATE_TAGS = ["Breakfast", "Lunch", "Dinner", "Snack"];
 
 function macroColor(value, target) {
   if (target == null) return "text-gray-700";
@@ -192,41 +198,66 @@ export default function Home() {
   const [historyHasMore, setHistoryHasMore] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedDays, setExpandedDays] = useState(new Set());
+  const [logDate, setLogDate] = useState(todayDateStr());
+  const [manualTag, setManualTag] = useState("");
   const fileInputRef = useRef(null);
+
+  const loadHistoryRange = useCallback(async (offset) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const endDate = new Date(today);
+    endDate.setDate(today.getDate() - offset - 1);
+    const startDate = new Date(today);
+    startDate.setDate(today.getDate() - offset - 7);
+    const { data, error: dbError } = await supabase
+      .from("meals")
+      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at, logged_date")
+      .gte("logged_date", toDateStr(startDate))
+      .lte("logged_date", toDateStr(endDate))
+      .order("logged_date", { ascending: false })
+      .order("created_at", { ascending: false });
+    if (dbError || !data) return { days: [], hasMore: false };
+    const grouped = {};
+    for (const meal of data) {
+      const key = meal.logged_date;
+      if (!grouped[key]) grouped[key] = [];
+      grouped[key].push(meal);
+    }
+    const days = Object.keys(grouped)
+      .sort((a, b) => b.localeCompare(a))
+      .map((dateStr) => ({ dateStr, meals: grouped[dateStr] }));
+    return { days, hasMore: data.length > 0 };
+  }, []);
 
   const fetchHistoryPage = useCallback(async (offset) => {
     setHistoryLoading(true);
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const end = new Date(today);
-    end.setDate(today.getDate() - offset - 1);
-    end.setHours(23, 59, 59, 999);
-    const start = new Date(today);
-    start.setDate(today.getDate() - offset - 7);
-    start.setHours(0, 0, 0, 0);
-    const { data, error: dbError } = await supabase
-      .from("meals")
-      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at")
-      .gte("created_at", start.toISOString())
-      .lte("created_at", end.toISOString())
-      .order("created_at", { ascending: false });
-    if (!dbError && data) {
-      const grouped = {};
-      for (const meal of data) {
-        const d = new Date(meal.created_at);
-        const key = [d.getFullYear(), String(d.getMonth() + 1).padStart(2, "0"), String(d.getDate()).padStart(2, "0")].join("-");
-        if (!grouped[key]) grouped[key] = [];
-        grouped[key].push(meal);
-      }
-      const days = Object.keys(grouped)
-        .sort((a, b) => b.localeCompare(a))
-        .map((dateStr) => ({ dateStr, meals: grouped[dateStr] }));
-      setHistory((prev) => [...prev, ...days]);
-      setHistoryHasMore(data.length > 0);
-      setHistoryOffset(offset + 7);
-    }
+    const { days, hasMore } = await loadHistoryRange(offset);
+    setHistory((prev) => [...prev, ...days]);
+    setHistoryHasMore(hasMore);
+    setHistoryOffset(offset + 7);
     setHistoryLoading(false);
-  }, []);
+  }, [loadHistoryRange]);
+
+  // Re-derives history from scratch (rather than appending) so a newly
+  // backdated entry lands under the correct day with correct totals, even
+  // if that day's page was already loaded.
+  const refreshHistory = useCallback(async () => {
+    setHistoryLoading(true);
+    const coverage = Math.max(historyOffset, 7);
+    let offset = 0;
+    let allDays = [];
+    let hasMore = true;
+    while (hasMore && offset < coverage) {
+      const page = await loadHistoryRange(offset);
+      allDays = [...allDays, ...page.days];
+      hasMore = page.hasMore;
+      offset += 7;
+    }
+    setHistory(allDays);
+    setHistoryHasMore(hasMore);
+    setHistoryOffset(offset);
+    setHistoryLoading(false);
+  }, [loadHistoryRange, historyOffset]);
 
   const fetchCoachingText = useCallback(async (meals, profileData) => {
     if (!profileData?.target_calories) { setCoachingText(""); return; }
@@ -268,12 +299,10 @@ export default function Home() {
 
   const fetchTodayMeals = useCallback(async () => {
     setLogLoading(true);
-    const { start, end } = todayRange();
     const { data, error: dbError } = await supabase
       .from("meals")
-      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at")
-      .gte("created_at", start)
-      .lte("created_at", end)
+      .select("id, description, name, calories, protein, carbs, fat, image_url, meal_tag, created_at, logged_date")
+      .eq("logged_date", todayDateStr())
       .order("created_at", { ascending: false });
     if (!dbError) setTodayMeals(data ?? []);
     setLogLoading(false);
@@ -370,6 +399,8 @@ export default function Home() {
   }
 
   async function handleLogMeal() {
+    const isToday = logDate === todayDateStr();
+    if (!isToday && !manualTag) return;
     setLogMealLoading(true);
     setError("");
     const { error: dbError } = await supabase.from("meals").insert({
@@ -380,7 +411,8 @@ export default function Home() {
       carbs: Math.round(Number(draft.carbs)),
       fat: Math.round(Number(draft.fat)),
       image_url: draft.image_url || null,
-      meal_tag: getMealTag(),
+      meal_tag: isToday ? getMealTag() : manualTag,
+      logged_date: logDate,
     });
     if (dbError) {
       console.error("[logMeal] Supabase insert error:", dbError);
@@ -389,7 +421,13 @@ export default function Home() {
       setDraft(null);
       setMeal("");
       removeImage();
-      await fetchTodayMeals();
+      setLogDate(todayDateStr());
+      setManualTag("");
+      if (isToday) {
+        await fetchTodayMeals();
+      } else {
+        await refreshHistory();
+      }
     }
     setLogMealLoading(false);
   }
@@ -592,6 +630,20 @@ export default function Home() {
           <h2 className="text-sm font-semibold text-gray-700 mb-4">Estimate your macros</h2>
 
           <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="log-date" className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                Log for
+              </label>
+              <input
+                id="log-date"
+                type="date"
+                value={logDate}
+                max={todayDateStr()}
+                onChange={(e) => { setLogDate(e.target.value); setManualTag(""); }}
+                className="w-full rounded-lg border border-gray-300 px-4 py-3 text-sm text-gray-900 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+
             <input
               type="text"
               value={meal}
@@ -683,6 +735,31 @@ export default function Home() {
                 {recalcLoading && <Spinner className="text-blue-700" />}
                 {recalcLoading ? "Recalculating…" : "Recalculate"}
               </button>
+
+              {logDate !== todayDateStr() && (
+                <div className="flex flex-col gap-1.5">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">
+                    Meal (required for a backdated entry)
+                  </p>
+                  <div className="grid grid-cols-4 gap-2">
+                    {BACKDATE_TAGS.map((tag) => (
+                      <button
+                        key={tag}
+                        type="button"
+                        onClick={() => setManualTag(tag)}
+                        className={`rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
+                          manualTag === tag
+                            ? "border-blue-500 bg-blue-50 text-blue-700"
+                            : "border-gray-200 text-gray-500 hover:border-gray-300"
+                        }`}
+                      >
+                        {tag}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -694,7 +771,7 @@ export default function Home() {
                 <button
                   type="button"
                   onClick={handleLogMeal}
-                  disabled={logMealLoading}
+                  disabled={logMealLoading || (logDate !== todayDateStr() && !manualTag)}
                   className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-3 text-sm font-semibold text-white hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {logMealLoading && <Spinner />}
